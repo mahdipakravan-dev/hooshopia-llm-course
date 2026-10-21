@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+# generated data and models (never commit these)
+data/clean/
+data/tokens/
+data/raw/
+checkpoints/
+reports/
+*.bin
+*.pt
