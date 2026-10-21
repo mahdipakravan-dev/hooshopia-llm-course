@@ -15,8 +15,8 @@ def make(vocab=97, **kw):
 
 def test_shapes_and_initial_loss():
     model = make()
-    idx = torch.randint(97, (3, 16))
-    logits, loss = model(idx, idx)
+    idx, targets = torch.randint(97, (3, 16)), torch.randint(97, (3, 16))
+    logits, loss = model(idx, targets)
     assert logits.shape == (3, 16, 97)
     assert abs(loss.item() - math.log(97)) < 0.3   # small init -> nearly uniform predictions
 
