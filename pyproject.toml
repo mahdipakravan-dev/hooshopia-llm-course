@@ -1,0 +1,9 @@
+[project]
+name = "hooshopia-llm-course"
+version = "0.0.0"
+description = "Hooshopia course: a small chat LLM built from scratch, no API"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
