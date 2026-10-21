@@ -1,0 +1,9 @@
+{
+  "_note": "~110M params (GPT-2 small size); an 80 GB GPU or several GPUs' worth of time; ~2.6B tokens at 40k steps",
+  "out_dir": "checkpoints/base",
+  "block_size": 1024, "n_layer": 12, "n_head": 12, "n_embd": 768, "dropout": 0.0,
+  "batch_size": 16, "grad_accum": 4,
+  "max_steps": 40000, "lr": 6e-4, "min_lr": 6e-5, "warmup_steps": 1000,
+  "eval_every": 1000, "eval_iters": 50, "log_every": 50,
+  "dtype": "auto", "compile": true
+}
