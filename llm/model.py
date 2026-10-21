@@ -68,6 +68,29 @@ def attention_manual(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, causal: 
     return F.softmax(scores.float(), dim=-1).type_as(q) @ v
 
 
+class LayerCache:
+    """Keys and values of every token seen so far, for one layer."""
+
+    def __init__(self):
+        self.k: torch.Tensor | None = None
+        self.v: torch.Tensor | None = None
+
+    def append(self, k: torch.Tensor, v: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        self.k = k if self.k is None else torch.cat([self.k, k], dim=2)
+        self.v = v if self.v is None else torch.cat([self.v, v], dim=2)
+        return self.k, self.v
+
+
+class KVCache:
+    def __init__(self, n_layer: int):
+        self.layers = [LayerCache() for _ in range(n_layer)]
+
+    @property
+    def seq_len(self) -> int:
+        k = self.layers[0].k
+        return 0 if k is None else k.size(2)
+
+
 class CausalSelfAttention(nn.Module):
     def __init__(self, cfg: GPTConfig):
         super().__init__()
@@ -79,17 +102,26 @@ class CausalSelfAttention(nn.Module):
         self.resid_drop = nn.Dropout(cfg.dropout)
         self.use_sdpa = True   # PyTorch's fused kernel; same math as attention_manual, much faster
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                cache: "LayerCache | None" = None) -> torch.Tensor:
         B, T, C = x.shape
         q, k, v = self.qkv(x).split(C, dim=2)
         # (B, T, C) -> (B, n_head, T, head_dim): every head attends independently
         q, k, v = (t.view(B, T, self.n_head, self.head_dim).transpose(1, 2) for t in (q, k, v))
         q, k = apply_rope(q, cos, sin), apply_rope(k, cos, sin)
-        if self.use_sdpa:
+        if cache is not None:   # part 6: reuse keys/values of earlier tokens instead of recomputing them
+            k, v = cache.append(k, v)
+        S = k.size(2)
+        if not self.use_sdpa:
+            y = attention_manual(q, k, v)
+        elif T == S:
             y = F.scaled_dot_product_attention(q, k, v, is_causal=True,
                                                dropout_p=self.dropout if self.training else 0.0)
-        else:
-            y = attention_manual(q, k, v)
+        elif T == 1:            # one new token may look at everything already in the cache
+            y = F.scaled_dot_product_attention(q, k, v)
+        else:                   # several new tokens after a cached prefix
+            mask = torch.ones(T, S, dtype=torch.bool, device=q.device).tril(diagonal=S - T)
+            y = F.scaled_dot_product_attention(q, k, v, attn_mask=mask)
         y = y.transpose(1, 2).contiguous().view(B, T, C)                   # heads back side by side
         return self.resid_drop(self.proj(y))
 
@@ -111,8 +143,9 @@ class Block(nn.Module):
         self.norm1, self.attn = RMSNorm(cfg.n_embd), CausalSelfAttention(cfg)
         self.norm2, self.mlp = RMSNorm(cfg.n_embd), MLP(cfg)
 
-    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), cos, sin)   # residual: each layer adds to x, never replaces it
+    def forward(self, x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                cache: "LayerCache | None" = None) -> torch.Tensor:
+        x = x + self.attn(self.norm1(x), cos, sin, cache)   # residual: each layer adds to x, never replaces it
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -143,13 +176,14 @@ class GPT(nn.Module):
     def num_params(self) -> int:
         return sum(p.numel() for p in self.parameters())
 
-    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None):
+    def forward(self, idx: torch.Tensor, targets: torch.Tensor | None = None, cache: "KVCache | None" = None):
         B, T = idx.shape
-        assert T <= self.cfg.block_size, f"sequence length {T} > block_size {self.cfg.block_size}"
-        cos, sin = self.rope_cos[:T], self.rope_sin[:T]
+        start = cache.seq_len if cache is not None else 0     # position of the first new token
+        assert start + T <= self.cfg.block_size, f"sequence length {start + T} > block_size {self.cfg.block_size}"
+        cos, sin = self.rope_cos[start:start + T], self.rope_sin[start:start + T]
         x = self.drop(self.tok_emb(idx))
-        for block in self.blocks:
-            x = block(x, cos, sin)
+        for i, block in enumerate(self.blocks):
+            x = block(x, cos, sin, cache.layers[i] if cache is not None else None)
         logits = self.lm_head(self.norm_f(x))
         loss = None
         if targets is not None:   # targets = -100 are ignored (used by SFT in part 7)
